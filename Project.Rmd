@@ -1,0 +1,419 @@
+---
+title: "Project Report"
+author: "Donya Hamzeian 20852145"
+date: "4/16/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, cache = T)
+```
+
+
+```{r, echo=FALSE}
+library(astsa)
+library(forecast)
+library(rugarch)
+library(tseries)
+library(ggplot2)
+library(fGarch)
+```
+
+
+#Scenario 1
+
+For this scenario, I have taken lag 1 difference to detrend the series and then taken lag 12 difference of the already differenced  series to remove seasonality. This data is a monthly data, so it makes sense for it to have a seasonality of 12. The reason why I did this is because as you can see in the plots below, the acf of the "hyd" shows seasonality or trend (or both) and the acf of the differenced series of "hyd" shows seasonality (because the series has already been detrended). Therefore, I think sarima model is a good choice for this data.
+```{r}
+
+hyd = read.csv("hyd_post.txt")
+hydx= ts(hyd$x, frequency = 12)
+diffx= diff(hydx)
+diff12x = diff(diffx, 12)
+
+plot.ts(cbind(hydx, diffx, diff12x), main = "Hydro")
+
+acf0 = acf2(diff12x, 100, plot= T, main = "ACF & PACF of hyd, 12))" )
+
+acf1 = acf2(diffx, 100, plot= T, main = "ACF & PACF of diff(hyd)" )
+
+acf2 = acf2(diff12x, 100, plot= T, main = "ACF & PACF of diff(diff(hyd), 12))" )
+
+print("Dickey-Fuller test on the hyd series")
+adf.test(hydx)
+print("Dickey-Fuller test on the diff(diff(hyd),12) series")
+adf.test(diff12x)
+```
+
+Based on the acf of the three series, i.e. hyd, diff(hyd), diff(diff(hyd), 12), you can see that the diff(diff(hyd), 12) is quite similar to a stationary process, except for some few lags. Additionally, the Dickey-Fuller test on the hyd series and the diff(diff(hyd), 12) shows that hyd series was not stationary, but after twice differencing(with lag 1 and 12), it is stationary. Therefore, I decided the d, D, and S parameters of sarima to be 1, 1, and 12 respectively. Now, based on the ACF and PACF of diff(diff(hyd),12), we have to find p,q, P, and Q of the sarima model. The ACF cuts off at lag 1, but the PACF on the seasonality lags does not cut off at any specific lag and it trails off which shows MA for seasonality. Also, the PACF and ACF of the non-seasonality lags shows trail-off not cut-off at any specific lags, which is ARMA. However, the choice of p, q, P, and Q should also be based on MSE, i.e. these parameters should be selected in order to minimize the MSE on the test set. Therefore, I splitted my data into 2 parts- dtrain(the first 552 observations) and dtest(the last 24 observations)- in order to calculate MSE. I tested different values of p,q, P, and Q, and the least MSE as well as significant coefficients that I obtained on dtest is 8.92 with these parameters: 1,0, 0, 1.
+
+
+
+#Evaluate the model on test data
+```{r}
+ntrain= nrow(hyd)-24
+dtrain = hyd[1:ntrain,"x" ]
+dtest = hyd[(ntrain+1):nrow(hyd),"x" ]
+sar= sarima(dtrain, 1,1,0,0,1,1,12 )
+pred = sarima.for(dtrain, 24, 1,1,0,0,1,1,12 )
+MSE_test = sum((pred$pred-dtest)^2)
+```
+
+Now that I have selected the best sarima model,  I am going to fit this model on the whole series and use sarima.for function to get 24 steps ahead predictions. 
+```{r}
+sar= sarima(hydx, 1,1,0,0,1,1,12 )
+pred = sarima.for(hydx, 24, 1,1,0,0,1,1,12 )
+write.csv(file = "hamzeian_Scenario1.csv", pred$pred, row.names = F)
+```
+The ACF of residuals looks stationary(except for few lags), but the Ljung-box test is not perfect because the p.values are not big. Then, I have plotted the acf of squared residuals to see if there is a serial correlation between them and the garch model is needed to fit on the residuals, but as you can see below, the acf of the squared residuals does not show serial correlation and also the Dickey-Fuller test shows that they are stationary. Therefore, there is no need to fit a garch model on the residuals. 
+
+```{r}
+tsdisplay(sar$fit$residuals^2 , main = 'Squared Residuals')
+print("adf test on squared residuals")
+adf.test(sar$fit$residuals^2)
+```
+
+Now, I am going to build 95% confidence band for the predictions:
+```{r}
+lower = pred$pred-3.075*pred$se
+upper = pred$pred+3.075*pred$se
+plot(pred$pred, ylim = c(min(lower), max(upper))) 
+lines(lower, lty= 2)
+lines(upper, lty = 2)
+```
+
+
+
+
+
+
+
+
+#Scenario 2
+##read data
+```{r}
+stocks = data.frame(x = 1:150)
+for(i in 1:40){
+  filename = paste(paste("stock", i, sep = ""), ".txt", sep = "")
+  stocks[[i+1]] = read.csv(filename)$x
+}
+```
+
+
+
+For this scenario, I used garch(1,0) to the data and got the 10 step ahead predictions for standard errors and used the empirical distribution of the (standardized) residuals, noises, to calculate their 15% quantile to build the 15% quantile of the returns. My options for calculating these 15% quantiles were as follows. 
+* 1) use 15% quantile of normal for all the stocks with a) garch(1,0) or b) garch(1,1) for predicting the standard errors
+* 2)  use 15% quantile of the empirical distribution of the residuals from a) garch(1,0) model or b) garch(1,1) model. (Also, use the same garch model for predicting standard deviation)
+
+* 3) for stocks that are normal use normal quantiles with a) garch(1,1) b) garch(1,0) and for the others use the empirical method with a)garch(1,1) and b) garch(1,0). In order to test whether a series is normal or not, I used the Jarque- Bera test and assumed the series is normal if the p.value was less than 0.05 and non-normal otherwise.
+
+For comparing the above options, I used the first 140 entries of each of the stocks as the train and the rest as the test data and calculated the errors as given in the descriptions and chose the option with the least absolute error. 
+The absolute errors for each option are:
+* 1 a) 0.005292785 , b) 0.005327665
+* 2 a) 0.005246517, b) 0.005254587
+* 3 a) 0.005312221, b) 0.005293085
+Therefore, I chose 2a option which involves using garch(1,0) to predict the standard errors and use the 15% quantiles of the residuals for building the final quantiles. 
+
+```{r}
+vars = data.frame(x= 1:10)
+n= 150
+for( i in 2:41){
+  model.garch = garchFit(~garch(1,0), data = stocks[[i]][1:n], cond.dist = "std", trace = F)
+# jtest = jarque.bera.test(stocks[[i]])
+# if( jtest$p.value>0.05){
+q= quantile(residuals(model.garch, standardize = T), 0.15)
+# }
+# else{
+# q= qnorm(0.15)
+# }
+VaR95_td =  mean(stocks[[i]][1:n])+ predict(model.garch, n.ahead = 10)$standardDeviation*q
+
+vars[[i]] = VaR95_td
+}
+write.csv(file = "hamzeian_Scenario2.csv", vars[, 2:41], row.names = F )
+```
+
+#calculateError
+This is the code that I used for calculating the error on the test set.
+```{r, eval = F}
+sum = 0
+for (i in 2:41){
+  for (j in 1:10){
+    if(stocks[[i]][140+j]<= vars[[i]][j]){
+      sum = sum+(stocks[[i]][140+j]-vars[[i]][j] )*(1-0.15)
+    }
+    else{
+      sum = sum+(stocks[[i]][140+j]-vars[[i]][j] )*(0-0.15)
+    }
+  }
+}
+err = sum/400
+
+```
+
+
+In the below graph I fitted the garch(1,0) on the whole data  and used it to get the estimated(not predicted) standard deviations and used the 15% quantile of the empirical distribution of the residuals to build the final quantiles. Finally, I also plotted the predicted 10-step ahead 15% quantiles in the tail of the plot.
+```{r}
+  model.garch = garchFit(~garch(1,0), data = stocks[[2]][1:n], cond.dist = "std", trace = F)
+
+  q= quantile(residuals(model.garch, standardize = T), 0.15)
+
+VaR95_td =  mean(stocks[[2]][1:n])+ model.garch@sigma.t*q
+
+qplot(y = c(VaR95_td, vars[[2]]) , x = 1:(n+10) , geom = 'line') +
+    geom_point(aes(x = 1:n , y =stocks[[2]][1:n]  , color = as.factor(stocks[[2]][1:n] < VaR95_td)) , size = 2) + scale_color_manual(values = c('gray' , 'red')) +
+    labs(y = 'Returns', x= 'time' ) + theme_light() +
+    theme(legend.position = 'none')
+
+print("The percentage of returns that are below var")
+sum(stocks[[2]] < VaR95_td)*100/150
+
+```
+Only 15.33% of the returns in the first series are below the 15% quantile, which is so promising.
+
+
+#Scenatio 3 & 4
+For this scenario, I merged all the series into one dataframe so that they are all correspoding to a single time vector. 
+```{r}
+prod_target = read.csv("prod_target.txt", stringsAsFactors = F)[, c("V1", "V2")]
+colnames(prod_target)= c("time", "target" )
+
+car_prod = read.csv("prod_1.txt", stringsAsFactors = F)[, c("V1", "V2")]
+colnames(car_prod)= c("time", "car" )
+
+steel_prod = read.csv("prod_2.txt", stringsAsFactors = F)[, c("V1", "V2")]
+colnames(steel_prod)= c("time", "steel" )
+
+eng_1 = read.csv("eng_1.txt", stringsAsFactors = F)[, c("V1", "V2")]
+colnames(eng_1)= c("time", "eng_1" )
+
+eng_2 = read.csv("eng_2.txt", stringsAsFactors = F)[, c("V1", "V2")]
+colnames(eng_2)= c("time", "eng_2" )
+
+temp = read.csv("temp.txt", header = F, stringsAsFactors = F)
+temp[1, ]= c("1", "1943", "10", "20.4")
+temp[nchar(temp$V3)<2, ]$V3 = paste("0", temp[nchar(temp$V3)<2, ]$V3, sep = "")
+temp$V1 = NULL
+temp[, 2] = paste(temp$V2, temp$V3, sep = "-")
+temp$V2 = NULL
+colnames(temp)= c("time", "temp" )
+temp$temp = as.numeric(temp$temp)
+
+#merge
+df = merge(merge(merge(merge(merge(prod_target, eng_1, by = "time") , eng_2, by = "time"), steel_prod, by = "time"), car_prod, by = "time", all.x = T), temp, by = "time") 
+```
+
+
+First, I want to impute the 30 missing values in `prod_target`. In order to do this, I want to know how this series is correlated to the other series. Maybe, I can use the past or future values of the exogenous series to impute y. In order to do this, I first fitted a sarima model to the  series and obtained the residuals and looked at the cross correlations of the exogenous series with the residuals of the target series. I used the ccf plot for this task. For this part I used only the first 200 points, i.e.  the data before the missing values of the target series. However, before fitting a sarima model I need ot use acf and pacf of the target, difference of the target, and etc to determine the p, d, q, P, D, and Q. The acf of the series shows trend and/or seasonality, so I differenced it. The acf of the differenced series again shows seasonality, so I differenced it with lag 12. Since it is a monthly data, it makes sense to have seasonality of 12. After twice differencing no trend or seasonality can be seen. Therefore, d=1, D=1, and S=12 seems good.  By looking at the ACF and PACF of this new series, I realized that MA for non-seasonal and AR for seasonal part seems reasonable. By changing p,q, P, and Q I found p=0, q=1, P= 4 and Q=0 fitting well to the data. AIC was minimum as well as all coefficients being significant. Finally, I fit this model to the data and obtained the residuals
+
+```{r}
+impute_df = df[1:200, ]
+acf_0 = acf2(impute_df$target, 50, plot=T)
+diffx = diff(impute_df$target)
+diff_acf = acf2(diffx, 50, plot = T)
+diff12x = diff(diffx, 12)
+diff12_acf = acf2(diff12x, 50)
+fit1 = sarima(impute_df$target, 0, 1, 1, 4, 1, 0, 12 )
+dtarget = resid(fit1$fit)
+
+```
+
+Below you can see the ccf plot of the residuals of the target series with the exogeneous series series
+```{r}
+ccf2(impute_df$temp, dtarget, main = " temp & residuals of target")
+ccf2(impute_df$eng_1, dtarget, main = "eng_1 & residuals of target")
+ccf2(impute_df$eng_2, dtarget, main = "eng_2 & residuals of target")
+ccf2(impute_df$steel, dtarget, main = "steel & residuals of target")
+ccf2(impute_df$car[67:200], dtarget[67:200], main = "car & residuals of car")
+
+
+```
+
+
+* The ccf with temp , does not show any large cross-correlation. This holds also for `eng_1`, `eng_2` and `steel`.(lower than 0.1)
+
+* The ccf with car shows  quite big autocorrelations(bigger than 0.1) at lag 0, +1, and +2. So, it seems that the target series lead the car series and the correlation of target(t) & car(t), target(t) & car(t+1) , and target(t) & car(t+2) are quite big. So I will include these 3 lags in the model for imputing the target series.
+
+Below, you can see my code for predicting 30 steps ahead for the target value using ARIMAX method and sarima.for function. The regressors(exogenous variables) are lag 0, +1, and +2 of the car series and the parameters for sarima is the same as before. 
+
+```{r}
+#The values of car before 67 is all NA's so I replaced them with the 67th value of car, it does not affect our final model because we only need  lag 0 , +1 and +2 for predicting the target
+impute_df[is.na(impute_df$car), "car"] = 13505
+df[is.na(df$car), "car"] = 13505
+
+  u     = ts.intersect(M=ts(impute_df$target) ,  C0 = ts(df$car),
+C1=stats::lag(ts(df$car), 1), C2 = stats::lag(ts(df$car), 2))
+
+  
+  newxreg = ts.intersect(C0= ts(df$car), C1=stats::lag(ts(df$car), 1),  C2 = stats::lag(ts(df$car), 2))
+
+  newxreg = newxreg[201:230, 1:3]
+  
+sar = sarima(u[,1], 0, 1, 1, 4, 1, 0, 12,  xreg=u[,2:4])
+
+imputed_values = sarima.for(u[,1], n.ahead = 30,  0, 1, 1, 4, 1, 0, 12,xreg = u[, 2:4], newxreg = newxreg)$pred
+
+
+imputed_target = df$target
+imputed_target[is.na(imputed_target)]= imputed_values
+plot.ts(imputed_target)
+lines(imputed_values, col = "red")
+
+df$target = imputed_target
+write.csv(file = "hamzeian_Scenario3.csv", imputed_values, row.names = F )
+```
+Above, you can see the imputed values(red parts) as a part of the whole series(black parts)
+
+Now, we need to do the forecasting. Once again, we have to find the cross correlation of the residuals of the target series with the exogenous variables. 
+In order to do this, a suitable sarima model should be fitted to the target series and residuals should be obtained. Again, the acf of the target series shows trend and/or seasonality and the acf of the differenced series shows big autocorrelation in lags 12, 24, and etc, so we have seasonality and we need to do the seasonal differencing. By trying different values for parameters of sarima, I determined the parameters to be p=2, q= 1, P = 2, and Q=2. 
+```{r}
+
+acf_0 = acf2(df$target, 50, plot=T)
+diffx = diff(df$target)
+diff_acf = acf2(diffx, 100, plot = T)
+diff12x = diff(diffx, 12)
+diff12_acf = acf2(diff12x, 50)
+
+fit2 = sarima(df$target, 2, 1, 1, 2, 1, 2, 12 )
+dtarget2 = resid(fit2$fit)
+ccf2(df$temp, dtarget2, main = " temp & residuals of target")
+ccf2(df$eng_1, dtarget2, main = "eng_1 & residuals of target")
+ccf2(df$eng_2, dtarget2, main = "eng_2 & residuals of target")
+ccf2(df$steel, dtarget2, main = "steel & residuals of target")
+ccf2(df$car[67:nrow(df)], dtarget2[67:nrow(df)], main = "car & residuals of car")
+
+```
+
+* The ccf with temp shows large correlation at lag -4. (higher than 0.1)
+
+* The ccf with `eng_1` , does not show any large cross-correlation. This holds also for `eng_2` .(lower than 0.1)
+
+
+* The ccf with steel shows quite big autocorrelation (bigger than 0.1) at lag -9.
+
+* The ccf with car shows  quite big autocorrelations(bigger than 0.1) at lag -10 and +2.  However, it does not make sense here to use the future values of car to predict the target series, so I only use the lag -10 value of car. 
+
+Before using temp(t-4), car(t-10), and steel(t-9) to predict the target, I have to predict car , steel, and temp individually using appropriate sarima models.
+
+###Predicting car series 24 steps ahead
+```{r}
+acf_car = acf2(diff(diff(df$car[67:nrow(df)]), 12), plot = T, 50)
+fit_car = sarima(df$car[67:nrow(df)], 2,1,0, 4, 1,1, 12)
+pred_car = sarima.for(df$car[67:nrow(df)],24, 2,1,0, 4, 1,1, 12)$pred
+```
+
+
+###Predicting steel series 24 steps ahead
+```{r}
+acf_steel = acf2(diff(diff(df$steel), 12), plot = T, 50)
+fit_steel = sarima(df$steel,  0, 1, 2, 0, 1,1, 12)
+pred_steel = sarima.for(df$steel, 24,  0, 1, 2, 0, 1,1, 12)$pred
+```
+
+###Predicting temp series 24 steps ahead
+
+```{r}
+acf_temp = acf2(diff(diff(df$temp), 12), plot = T, 50)
+fit_temp = sarima(df$temp, 0, 1, 2, 0, 1,1, 12)
+pred_temp = sarima.for(df$temp,24,  0, 1, 2, 0, 1,1, 12)$pred
+
+```
+
+
+###Forecasting target with exogenous variables for 24 steps ahead
+```{r}
+xreg= ts.intersect( C1=stats::lag(ts(c(df$car, pred_car)), -10), C2 = stats::lag(ts(c(df$temp, pred_temp)), -4), C3 = stats::lag(ts(c(df$steel, pred_steel)), -9))
+
+sar = sarima(df$target[67:nrow(df)], 2, 1, 1, 2, 1, 2, 12,  xreg=xreg[67:nrow(df)])
+
+forecasted_values = sarima.for(df$target[67:nrow(df)], n.ahead = 24,  2, 1, 1, 2, 1, 2, 12, xreg=xreg[67:nrow(df)], newxreg = xreg[(nrow(df)+1): (nrow(df)+24)])$pred
+
+
+
+plot.ts(c(df$target[67:nrow(df)], forecasted_values) )
+lines(forecasted_values, col = "red")
+write.csv(file = "Hamzeian_Scenario4.csv", forecasted_values, row.names = F)
+```
+
+
+
+
+
+
+#Scenario5
+```{r}
+pollution1 = ts(read.csv("pollutionCity1.txt")$x, frequency = 48)
+pollution2 = read.csv("pollutionCity2.txt")$x
+pollution3 = read.csv("pollutionCity3.txt")$x
+plot.ts(cbind(pollution1, pollution2, pollution3))
+plot.ts(cbind(diff(pollution1), diff(pollution2), diff(pollution3)))
+
+```
+
+####forecast for pollution1 
+For this scenario I used sarima. The ACF of the series show seasonality and/or trend, so I differenced it. The ACF of the differenced series show seasonality because at lags 48 the autocorrelations are big which makes sense because the data is half- hourly and the cycle is 24*2. Then I took difference of 48. To determine the parameters of the sarima model, I plotted the acf of the diff(diff(pollition1), 48). The seasonality part seems to be MA(ACF cuts off, and PACF trails off) and the non-seasonal component seem to be AR(PACF at seasonality lags cut off and ACF trails off). So, I tried different values and this is the best result that I obtained according to the AIC and significant coefficients. 
+```{r}
+acf = acf2(pollution1, 100, plot = T)
+acfx = acf2(diff(pollution1), 300, plot = T)
+
+acfdiffx = acf2(diff(diff(pollution1), 48),  200, plot = T)
+
+sar = sarima(pollution1, 2,1,1, 0,1,2,48)
+pred_1 = sarima.for(pollution1,n.ahead = 336, 2,1,1, 0,1,2,48)
+
+
+lower = pred_1$pred-3.075*pred_1$se
+upper = pred_1$pred+3.075*pred_1$se
+plot(pred_1$pred, ylim = c(min(lower), max(upper)), main= "95% confidence band") 
+lines(lower, lty= 2)
+lines(upper, lty = 2)
+```
+
+###forecast for pollution2
+The acf of pollution 2 shows trend, but after differencing it shows no seasonality. Based on the acf and pacf of the differenced series, we can say that it is an arma process. I changed values of p and q to obtain the least AIC with significant coefficients. The Ljung box is not good, but the residuals seem to be stationary.
+```{r}
+acf = acf2(pollution2, 100, plot = T)
+
+acfx = acf2(diff(pollution2), 100, plot = T)
+
+
+arma = sarima(pollution2, 1,1,3)
+pred_2 = sarima.for(pollution2,n.ahead = 336,  1,1,3)
+
+
+lower = pred_2$pred-3.075*pred_2$se
+upper = pred_2$pred+3.075*pred_2$se
+plot(pred_2$pred, ylim = c(min(lower), max(upper)), main= "95% confidence band") 
+lines(lower, lty= 2)
+lines(upper, lty = 2)
+
+
+```
+
+
+
+###Forecast for pollition3
+The ACF of the series shows trend and after differencing the acf shows seasonality of 48. The acf of diff(diff(pollution3), 48) cuts off at seasonality lags so the seasonality component is MA. However,  the non-seasonal component is ARMA.  I tried different p, q's to find the minimum AIC with significant coefficients. 
+```{r}
+acf = acf2(pollution3, 50, plot = T)
+
+acfx = acf2(diff(pollution3), 100, plot = T)
+acfdiffx = acf2(diff(diff(pollution3), 48), 100, plot = T)
+
+sar = sarima(pollution3, 2,1,1, 0,1,2,48)
+pred_3 = sarima.for(pollution3,n.ahead = 336, 2,1,1, 0,1,2,48)
+
+
+lower = pred_3$pred-3.075*pred_3$se
+upper = pred_3$pred+3.075*pred_3$se
+plot(pred_3$pred, ylim = c(min(lower), max(upper)), main= "95% confidence band") 
+lines(lower, lty= 2)
+lines(upper, lty = 2)
+```
+
+```{r}
+write.csv(file = "hamzeian_Scenario5.csv", data.frame(city1 = pred_1$pred, city2 = pred_2$pred, city3 = pred_3$pred), row.names = F)
+```
+
+
+
+
